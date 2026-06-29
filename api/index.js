@@ -6,6 +6,11 @@ app.use(express.json());
 
 const { WHATSAPP_TOKEN, VERIFY_TOKEN, PHONE_NUMBER_ID } = process.env;
 
+// --- NUEVO: La puerta principal para comprobar que Vercel funciona ---
+app.get('/', (req, res) => {
+    res.send('🔌 El cerebro de Plug n Go está en línea y funcionando al 100%');
+});
+
 // 1. Endpoint para verificar el Webhook en Meta
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
@@ -19,6 +24,9 @@ app.get('/webhook', (req, res) => {
         } else {
             res.sendStatus(403);
         }
+    } else {
+        // --- NUEVO: Para que no marque error si entras desde tu navegador web ---
+        res.status(200).send('Webhook de WhatsApp listo para recibir mensajes.');
     }
 });
 
@@ -29,13 +37,11 @@ app.post('/webhook', async (req, res) => {
     if (body.object) {
         if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
             const message = body.entry[0].changes[0].value.messages[0];
-            const from = message.from; // Número del cliente
+            const from = message.from; 
             
-            // Si es un mensaje de texto normal
             if (message.type === 'text') {
                 await enviarMenuPrincipal(from);
             } 
-            // Si es una respuesta a los botones
             else if (message.type === 'interactive') {
                 const botonID = message.interactive.button_reply.id;
                 
@@ -52,7 +58,6 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// Función para enviar menú de botones
 async function enviarMenuPrincipal(to) {
     const data = {
         messaging_product: "whatsapp",
@@ -72,7 +77,6 @@ async function enviarMenuPrincipal(to) {
     await hacerPeticionWA(data);
 }
 
-// Función para enviar texto simple
 async function enviarTexto(to, texto) {
     const data = {
         messaging_product: "whatsapp",
@@ -83,7 +87,6 @@ async function enviarTexto(to, texto) {
     await hacerPeticionWA(data);
 }
 
-// Función central para comunicarse con Meta
 async function hacerPeticionWA(data) {
     try {
         await axios({
@@ -100,6 +103,5 @@ async function hacerPeticionWA(data) {
     }
 }
 
-// Para que Vercel inicie la app
 // Exportamos la app para que Vercel la pueda ejecutar
 module.exports = app;

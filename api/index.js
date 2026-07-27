@@ -1,11 +1,11 @@
 const express = require('express');
 const axios   = require('axios');
-const { Redis } = require('@upstash/redis');
+const Redis   = require('ioredis');
 const app     = express();
 
-// Cliente de Redis (Upstash) — lee UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN
-// que Vercel inyecta automáticamente al conectar la integración.
-const redis = Redis.fromEnv();
+// Cliente de Redis — usa la variable REDIS_URL que Vercel inyecta
+// automáticamente al conectar la integración "Redis" a tu proyecto.
+const redis = new Redis(process.env.REDIS_URL);
 
 app.use(express.json());
 
@@ -13,7 +13,6 @@ const {
     WHATSAPP_TOKEN,
     VERIFY_TOKEN,
     PHONE_NUMBER_ID,
-    // Comma-separated lists — soporta de 1 a 3 números cada uno:
     PERSONAL_NUMBERS,
     ADMIN_NUMBERS
 } = process.env;
@@ -54,11 +53,11 @@ const ESTADOS_KEY = 'plugandgo:estados';
 async function cargarEstados() {
     try {
         const data = await redis.get(ESTADOS_KEY);
-        return data || {};
+        return data ? JSON.parse(data) : {};
     } catch (e) { console.error('Error cargando estados:', e.message); return {}; }
 }
 async function guardarEstados(estados) {
-    try { await redis.set(ESTADOS_KEY, estados); }
+    try { await redis.set(ESTADOS_KEY, JSON.stringify(estados)); }
     catch (e) { console.error('Error guardando estados:', e.message); }
 }
 

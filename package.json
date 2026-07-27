@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "@upstash/redis": "^1.34.3"
   }
 }

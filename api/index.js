@@ -6,7 +6,16 @@ const app     = express();
 
 app.use(express.json());
 
-const { WHATSAPP_TOKEN, VERIFY_TOKEN, PHONE_NUMBER_ID, PERSONAL_PHONE_NUMBER } = process.env;
+const {
+    WHATSAPP_TOKEN,
+    VERIFY_TOKEN,
+    PHONE_NUMBER_ID,
+    PERSONAL_PHONE_NUMBER,
+    ADMIN_NUMBER           // Tu número admin para el micro-CRM. Puede ser igual a PERSONAL_PHONE_NUMBER.
+} = process.env;
+
+// Normaliza número: quita +, espacios y guiones para comparar de forma segura
+const normalizarNumero = n => (n ?? '').replace(/[\s+\-()]/g, '');
 
 // ═══════════════════════════════════════════════════════════════
 // PERSISTENCIA DE ESTADOS  (archivo JSON en disco)
@@ -111,24 +120,21 @@ const PREGUNTAS_CARGADOR = [
             "1️⃣ Tengo 220V (dos fases / línea de 220)\n" +
             "2️⃣ Solo tengo 127V (contactos normales)\n" +
             "3️⃣ No estoy seguro/a\n\n" +
-            "_(Si no sabes, también puedes mandarnos una foto de tu medidor o recibo de luz y lo checamos nosotros.)_\n\n" +
-            "💡 Escribe *menú* para regresar al inicio."
+            "_(Si no sabes, también puedes mandarnos una foto de tu medidor o recibo de luz y lo checamos nosotros.)_"
     },
     {
         estado: 'c3_metros',
         campo:  'metros',
         texto:
             "3️⃣ de 4 — *¿A cuántos metros aproximados está el tablero eléctrico del punto donde quieres instalar el cargador?*\n\n" +
-            "_(Una estimación está bien, ej: \"unos 8 metros\" o \"están en el mismo cuarto\".)_\n\n" +
-            "💡 Escribe *menú* para regresar al inicio."
+            "_(Una estimación está bien, ej: \"unos 8 metros\" o \"están en el mismo cuarto\".)_"
     },
     {
         estado: 'c4_ubicacion',
         campo:  'ubicacion',
         texto:
             "4️⃣ de 4 — *¿En qué ciudad y colonia será la instalación?*\n\n" +
-            "_(Solo ciudad y colonia, sin dirección exacta por ahora.)_\n\n" +
-            "💡 Escribe *menú* para regresar al inicio."
+            "_(Solo ciudad y colonia, sin dirección exacta por ahora.)_"
     }
 ];
 
@@ -152,8 +158,7 @@ const PREGUNTAS_PANELES = [
         campo:  'bimestral',
         texto:
             "2️⃣ de 3 — *¿Cuánto pagas aproximadamente en tu recibo de luz bimestral?*\n\n" +
-            "_(Una estimación está bien, ej: \"como $2,000\" o \"entre 3 y 4 mil\".)_\n\n" +
-            "💡 Escribe *menú* para regresar al inicio."
+            "_(Una estimación está bien, ej: \"como $2,000\" o \"entre 3 y 4 mil\".)_"
     },
     {
         estado: 'p3_recibo',
@@ -161,8 +166,7 @@ const PREGUNTAS_PANELES = [
         texto:
             "3️⃣ de 3 — ¡Ya casi! Para afinar la cotización necesitamos tu *recibo de luz*.\n\n" +
             "📸 Mándanos una foto del recibo *por ambos lados*.\n\n" +
-            "_(Esto nos permite ver tu historial de consumo y darte el tamaño exacto del sistema.)_\n\n" +
-            "💡 Escribe *menú* para regresar al inicio."
+            "_(Esto nos permite ver tu historial de consumo y darte el tamaño exacto del sistema.)_"
     }
 ];
 
@@ -175,7 +179,7 @@ async function alertarActualizacionCargador(from, datos, paso) {
     const labels  = ['', 'Auto', 'Voltaje', 'Distancia tablero', 'Ubicación'];
     const valores = [datos.marca, datos.voltaje, datos.metros, datos.ubicacion];
 
-    let msg = `${emojis[paso]} *Plug n Go — Lead Cargador* ⚡\n`;
+    let msg = `${emojis[paso]} *Plug&Go — Lead Cargador* ⚡\n`;
     msg    += `📱 Cliente: +${from}\n`;
     msg    += `📋 Paso ${paso}/4: *${labels[paso]}* → "${valores[paso - 1]}"\n\n`;
     msg    += `📊 *Resumen:*\n`;
@@ -195,7 +199,7 @@ async function alertarActualizacionPaneles(from, datos, paso) {
     const labels  = ['', 'Tipo propiedad', 'Pago bimestral', 'Recibo de luz'];
     const valores = [datos.tipo, datos.bimestral, 'Imagen recibida'];
 
-    let msg = `${emojis[paso]} *Plug n Go — Lead Paneles* ☀️\n`;
+    let msg = `${emojis[paso]} *Plug&Go — Lead Paneles* ☀️\n`;
     msg    += `📱 Cliente: +${from}\n`;
     msg    += `📋 Paso ${paso}/3: *${labels[paso]}* → "${valores[paso - 1]}"\n\n`;
     msg    += `📊 *Resumen:*\n`;
@@ -267,32 +271,162 @@ app.post('/webhook', async (req, res) => {
         const message = body.entry[0].changes[0].value.messages[0];
         const from    = message.from;
 
-        // ── Comandos admin ──
-        if (from === PERSONAL_PHONE_NUMBER && message.type === 'text') {
-            const resultado = await manejarComandoAdmin(message.text.body.trim(), res);
-            if (resultado !== null) return resultado;
+        // ══════════════════════════════════════════════════════════
+        // MICRO-CRM — solo se ejecuta si el mensaje viene del admin
+        // ══════════════════════════════════════════════════════════
+        if (normalizarNumero(from) === normalizarNumero(ADMIN_NUMBER)) {
+
+            // ── Comandos de gestión (#liberar, #listar) ──
+            if (message.type === 'text') {
+                const textoAdmin = message.text.body.trim();
+
+                // Primero verificar si es un comando de gestión
+                const resultadoComando = await manejarComandoAdmin(textoAdmin, res);
+                if (resultadoComando !== null) return resultadoComando;
+
+                // ── RELAY DE TEXTO: "#52XXXXXXXXXX\nMensaje aquí" ──
+                if (textoAdmin.startsWith('#')) {
+                    const saltoLinea = textoAdmin.indexOf('\n');
+
+                    if (saltoLinea === -1) {
+                        // Solo el número, sin mensaje
+                        await enviarTexto(ADMIN_NUMBER,
+                            "⚠️ Formato incorrecto. Usa:\n\n" +
+                            "*#52XXXXXXXXXX*\n" +
+                            "Tu mensaje aquí\n\n" +
+                            "_El número va en la primera línea, el mensaje en las siguientes._"
+                        );
+                        return res.sendStatus(200);
+                    }
+
+                    const numeroDestino = textoAdmin.slice(1, saltoLinea).trim().replace(/[\s+\-()]/g, '');
+                    const mensajeRelay  = textoAdmin.slice(saltoLinea + 1).trim();
+
+                    if (!numeroDestino || !mensajeRelay) {
+                        await enviarTexto(ADMIN_NUMBER, "⚠️ No pude leer el número o el mensaje. Verifica el formato.");
+                        return res.sendStatus(200);
+                    }
+
+                    try {
+                        await hacerPeticionWA({
+                            messaging_product: "whatsapp",
+                            to:   numeroDestino,
+                            type: "text",
+                            text: { body: mensajeRelay }
+                        });
+                        await enviarTexto(ADMIN_NUMBER, `✅ Mensaje enviado a +${numeroDestino}`);
+                        console.log(`[RELAY TEXTO] Admin → +${numeroDestino}`);
+                    } catch (e) {
+                        await enviarTexto(ADMIN_NUMBER, `❌ Error al enviar a +${numeroDestino}: ${e.message}`);
+                    }
+                    return res.sendStatus(200);
+                }
+            }
+
+            // ── RELAY DE IMAGEN: caption debe comenzar con "#52..." ──
+            if (message.type === 'image') {
+                const mediaId = message.image?.id;
+                const caption = (message.image?.caption ?? '').trim();
+
+                if (caption.startsWith('#')) {
+                    const primeraLinea  = caption.split(/\s|\n/)[0];
+                    const numeroDestino = primeraLinea.slice(1).replace(/[\s+\-()]/g, '');
+                    const textoExtra    = caption.slice(primeraLinea.length).trim();
+
+                    try {
+                        await hacerPeticionWA({
+                            messaging_product: "whatsapp",
+                            to:   numeroDestino,
+                            type: "image",
+                            image: {
+                                id: mediaId,
+                                ...(textoExtra && { caption: textoExtra })
+                            }
+                        });
+                        await enviarTexto(ADMIN_NUMBER, `✅ Imagen enviada a +${numeroDestino}`);
+                        console.log(`[RELAY IMAGEN] Admin → +${numeroDestino} | media_id: ${mediaId}`);
+                    } catch (e) {
+                        await enviarTexto(ADMIN_NUMBER, `❌ Error enviando imagen a +${numeroDestino}: ${e.message}`);
+                    }
+                } else {
+                    await enviarTexto(ADMIN_NUMBER,
+                        "📸 Para reenviar una imagen a un cliente, pon el número en el *caption* de la foto:\n\n" +
+                        "_Ejemplo:_ `#52XXXXXXXXXX Aquí tu cotización`"
+                    );
+                }
+                return res.sendStatus(200);
+            }
+
+            // ── RELAY DE DOCUMENTO/PDF: caption debe comenzar con "#52..." ──
+            if (message.type === 'document') {
+                const mediaId  = message.document?.id;
+                const caption  = (message.document?.caption ?? '').trim();
+                const filename = message.document?.filename ?? 'documento';
+
+                if (caption.startsWith('#')) {
+                    const primeraLinea  = caption.split(/\s|\n/)[0];
+                    const numeroDestino = primeraLinea.slice(1).replace(/[\s+\-()]/g, '');
+                    const textoExtra    = caption.slice(primeraLinea.length).trim();
+
+                    try {
+                        await hacerPeticionWA({
+                            messaging_product: "whatsapp",
+                            to:   numeroDestino,
+                            type: "document",
+                            document: {
+                                id:       mediaId,
+                                filename: filename,
+                                ...(textoExtra && { caption: textoExtra })
+                            }
+                        });
+                        await enviarTexto(ADMIN_NUMBER, `✅ Documento "${filename}" enviado a +${numeroDestino}`);
+                        console.log(`[RELAY DOC] Admin → +${numeroDestino} | media_id: ${mediaId}`);
+                    } catch (e) {
+                        await enviarTexto(ADMIN_NUMBER, `❌ Error enviando documento a +${numeroDestino}: ${e.message}`);
+                    }
+                } else {
+                    await enviarTexto(ADMIN_NUMBER,
+                        "📄 Para reenviar un PDF/documento a un cliente, pon el número en el *caption* del archivo:\n\n" +
+                        "_Ejemplo:_ `#52XXXXXXXXXX Cotización adjunta`"
+                    );
+                }
+                return res.sendStatus(200);
+            }
+
+            // Cualquier otro tipo desde admin (audio, video, sticker) → ignorar
+            return res.sendStatus(200);
         }
+        // ══════════════════════════════════════════════════════════
+        // FIN MICRO-CRM — a partir de aquí solo llegan clientes
+        // ══════════════════════════════════════════════════════════
 
         // ── Estado actual ──
         const entrada      = obtenerEstado(from);
         const estadoActual = entrada?.estado ?? null;
         const datos        = entrada?.datos  ?? {};
 
-        // ── Modo asesor: bot mudo ──
+        // ── Modo asesor: bot mudo + forward al admin ──
         if (estadoActual === 'asesor') {
             refrescarActividad(from);
-            console.log(`[ASESOR] Ignorando mensaje de ${from}`);
+            console.log(`[ASESOR] Forwardeando mensaje de ${from} al admin`);
+            await forwardMensajeCliente(from, message, 'asesor');
             return res.sendStatus(200);
         }
 
-        // ── Lead hecho: recordar que ya está en proceso ──
+        // ── Lead hecho: avisar al cliente (solo 1 vez) + forward al admin ──
         if (estadoActual === 'lead_hecho') {
             refrescarActividad(from);
-            await enviarTexto(from,
-                "Tu solicitud ya está en proceso 👍\n\n" +
-                "Un asesor de Plug n Go se pondrá en contacto contigo en breve por este mismo chat.\n\n" +
-                "_Si tienes alguna duda urgente, responde aquí y te atendemos._"
-            );
+            const yaAvisado = entrada?.yaAvisadoLeadHecho ?? false;
+            if (!yaAvisado) {
+                estadoUsuarios[from].yaAvisadoLeadHecho = true;
+                guardarEstados(estadoUsuarios);
+                await enviarTexto(from,
+                    "Tu solicitud ya está en proceso 👍\n\n" +
+                    "Un asesor de Plug&Go se pondrá en contacto contigo en breve por este mismo chat.\n\n" +
+                    "_Si tienes alguna duda urgente, responde aquí y te atendemos._"
+                );
+            }
+            await forwardMensajeCliente(from, message, 'lead_hecho');
             return res.sendStatus(200);
         }
 
@@ -317,14 +451,26 @@ app.post('/webhook', async (req, res) => {
                 // Botones de voltaje (paso c2)
                 } else if (['btn_220v', 'btn_127v', 'btn_nosabe_voltaje'].includes(botonID)) {
                     const voltajeMap = {
-                        'btn_220v':          '220V (dos fases)',
-                        'btn_127v':          '127V (contactos normales)',
-                        'btn_nosabe_voltaje': 'No sabe / necesita revisión'
+                        'btn_220v': '220V (dos fases)',
+                        'btn_127v': '127V (contactos normales)'
                     };
-                    const nuevosDatos = { ...datos, voltaje: voltajeMap[botonID] };
-                    setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
-                    await alertarActualizacionCargador(from, nuevosDatos, 2);
-                    await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
+
+                    if (botonID === 'btn_nosabe_voltaje') {
+                        // Sub-paso: pedirle foto del medidor o recibo
+                        setEstado(from, 'c2b_foto_voltaje', { datos, flujo: 'cargador' });
+                        await enviarTexto(from,
+                            "Sin problema, te ayudamos a saberlo 🔍\n\n" +
+                            "Puedes enviarnos cualquiera de estas opciones:\n\n" +
+                            "📸 *Foto de tu medidor de luz* (la caja gris afuera de tu casa)\n" +
+                            "📄 *Foto de tu recibo de luz* reciente\n" +
+                            "⏭️ Escribe *omitir* y un asesor lo evalúa en la visita técnica"
+                        );
+                    } else {
+                        const nuevosDatos = { ...datos, voltaje: voltajeMap[botonID] };
+                        setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                        await alertarActualizacionCargador(from, nuevosDatos, 2);
+                        await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
+                    }
 
                 } else {
                     await enviarMenuPrincipal(from);
@@ -343,6 +489,16 @@ app.post('/webhook', async (req, res) => {
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from,
                     "📸 ¡Recibida! Nuestro equipo revisará tu instalación con la foto.\n\n" +
+                    PREGUNTAS_CARGADOR[2].texto
+                );
+
+            // Imagen en sub-paso "no sé mi voltaje" → foto del medidor o recibo
+            } else if (estadoActual === 'c2b_foto_voltaje') {
+                const nuevosDatos = { ...datos, voltaje: 'Foto enviada — pendiente revisión' };
+                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await alertarActualizacionCargador(from, nuevosDatos, 2);
+                await enviarTexto(from,
+                    "📸 ¡Listo, imagen recibida! Nuestro equipo la revisará y te dirá qué tipo de instalación tienes.\n\n" +
                     PREGUNTAS_CARGADOR[2].texto
                 );
 
@@ -395,7 +551,6 @@ app.post('/webhook', async (req, res) => {
             }
 
             // ─── Si está en c2_voltaje y manda texto en lugar de botón ───
-            // (por si acaso el cliente escribe en lugar de tocar el botón)
             if (estadoActual === 'c2_voltaje') {
                 const txt = textoCliente.toLowerCase();
                 let voltajeDetectado = textoCliente;
@@ -407,6 +562,30 @@ app.post('/webhook', async (req, res) => {
                     voltajeDetectado = 'No sabe / necesita revisión';
                 }
                 const nuevosDatos = { ...datos, voltaje: voltajeDetectado };
+                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await alertarActualizacionCargador(from, nuevosDatos, 2);
+                await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
+
+            // ─── Sub-paso: esperando foto del medidor o "omitir" ───
+            } else if (estadoActual === 'c2b_foto_voltaje') {
+                const txt = textoCliente.toLowerCase();
+                let voltaje = 'Por evaluar en visita técnica';
+                if (txt.includes('omitir') || txt.includes('saltar') || txt.includes('después') || txt.includes('despues')) {
+                    voltaje = 'Por evaluar en visita técnica';
+                } else if (txt.includes('220') || txt.includes('dos fases')) {
+                    voltaje = '220V (dos fases)';
+                } else if (txt.includes('127') || txt.includes('110')) {
+                    voltaje = '127V (contactos normales)';
+                } else {
+                    // Cualquier otro texto en este estado → recordar las opciones
+                    await enviarTexto(from,
+                        "Para continuar puedes:\n\n" +
+                        "📸 Mandarnos una *foto de tu medidor* o *recibo de luz*\n" +
+                        "⏭️ Escribir *omitir* y un asesor lo evalúa en la visita"
+                    );
+                    return res.sendStatus(200);
+                }
+                const nuevosDatos = { ...datos, voltaje };
                 setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
@@ -430,7 +609,7 @@ app.post('/webhook', async (req, res) => {
                 await enviarTexto(from,
                     "📍 ¡Listo, ya tengo todo!\n\n" +
                     "Un asesor revisará tu información y te enviará la cotización de tu cargador Nivel 2 *en breve* ⚡\n\n" +
-                    "_¡Gracias por confiar en Plug n Go!_"
+                    "_¡Gracias por confiar en Plug&Go!_"
                 );
                 await alertarActualizacionCargador(from, datosFinal, 4);
 
@@ -479,6 +658,108 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// FORWARD DE MENSAJES DE CLIENTES AL ADMIN
+// ═══════════════════════════════════════════════════════════════
+// Se ejecuta cuando un cliente escribe estando en estado 'asesor' o 'lead_hecho'.
+// Le manda al admin el mensaje con el formato de respuesta listo para copiar.
+
+async function forwardMensajeCliente(from, message, contexto) {
+    const etiqueta = contexto === 'asesor' ? '🔵 *Conversación activa*' : '🟡 *Lead en proceso*';
+
+    // Construir preview del contenido según el tipo de mensaje
+    let preview = '';
+    let tieneMedia = false;
+    let mediaPayload = null;
+
+    if (message.type === 'text') {
+        preview = `💬 _"${message.text.body}"_`;
+
+    } else if (message.type === 'image') {
+        tieneMedia = true;
+        preview = '🖼️ _[El cliente mandó una imagen]_';
+        mediaPayload = {
+            type: 'image',
+            id:   message.image?.id,
+            caption: message.image?.caption ?? ''
+        };
+
+    } else if (message.type === 'document') {
+        tieneMedia = true;
+        const fname = message.document?.filename ?? 'documento';
+        preview = `📄 _[El cliente mandó un archivo: ${fname}]_`;
+        mediaPayload = {
+            type:     'document',
+            id:       message.document?.id,
+            filename: fname,
+            caption:  message.document?.caption ?? ''
+        };
+
+    } else if (message.type === 'audio' || message.type === 'voice') {
+        preview = '🎤 _[El cliente mandó un audio]_';
+
+    } else if (message.type === 'video') {
+        tieneMedia = true;
+        preview = '🎥 _[El cliente mandó un video]_';
+        mediaPayload = {
+            type: 'video',
+            id:   message.video?.id,
+            caption: message.video?.caption ?? ''
+        };
+
+    } else if (message.type === 'sticker') {
+        preview = '🃏 _[El cliente mandó un sticker]_';
+
+    } else {
+        preview = `❓ _[Tipo de mensaje: ${message.type}]_`;
+    }
+
+    // Armar el texto de notificación
+    const notif =
+        `${etiqueta}
+` +
+        `📱 Cliente: +${from}
+
+` +
+        `${preview}
+
+` +
+        `─────────────────
+` +
+        `↩️ *Para responderle con texto:*
+` +
+        `#${from}
+` +
+        `Tu respuesta aquí
+
+` +
+        `↩️ *Para imagen/PDF:* adjunta el archivo y pon en el caption:
+` +
+        `\`#${from} texto opcional\``;
+
+    await enviarTexto(ADMIN_NUMBER, notif);
+
+    // Si el mensaje tiene media, también se la reenviamos al admin
+    // para que la pueda ver directamente en su WhatsApp
+    if (tieneMedia && mediaPayload) {
+        try {
+            const mediaData = {
+                messaging_product: "whatsapp",
+                to:   ADMIN_NUMBER,
+                type: mediaPayload.type,
+                [mediaPayload.type]: {
+                    id: mediaPayload.id,
+                    ...(mediaPayload.caption && { caption: mediaPayload.caption }),
+                    ...(mediaPayload.filename && { filename: mediaPayload.filename })
+                }
+            };
+            await hacerPeticionWA(mediaData);
+        } catch (e) {
+            console.error(`[FORWARD MEDIA] Error reenviando media al admin: ${e.message}`);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // FUNCIONES API WHATSAPP
 // ═══════════════════════════════════════════════════════════════
 
@@ -491,7 +772,7 @@ async function enviarMenuPrincipal(to) {
             type: "button",
             body: {
                 text:
-                    "¿Qué tal? Soy el asistente de *Plug n Go* ⚡\n\n" +
+                    "¿Qué tal? Soy el asistente de *Plug&Go* ⚡\n\n" +
                     "Cuéntame, ¿en qué proyecto estás pensando?"
             },
             footer: { text: "Escribe 'menú' en cualquier momento para volver aquí." },
@@ -517,7 +798,7 @@ async function enviarBotonesVoltaje(to) {
                     "2️⃣ de 4 — *¿Qué tipo de instalación eléctrica tienes disponible?*\n\n" +
                     "Si no estás seguro/a, también puedes mandarnos una *foto de tu medidor o recibo de luz* y lo checamos nosotros 📸"
             },
-            footer: { text: "Escribe 'menú' para regresar al inicio." },
+            footer: { text: "Escribe 'menú' para volver al inicio si lo necesitas." },
             action: {
                 buttons: [
                     { type: "reply", reply: { id: "btn_220v",          title: "✅ Tengo 220V"        } },

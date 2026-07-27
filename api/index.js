@@ -10,7 +10,7 @@ const {
     WHATSAPP_TOKEN,
     VERIFY_TOKEN,
     PHONE_NUMBER_ID,
-    // Comma-separated lists — supports 1 to 3 numbers each:
+    // Comma-separated lists — soporta de 1 a 3 números cada uno:
     // PERSONAL_NUMBERS=526391237966,521234567890
     // ADMIN_NUMBERS=526391237966,521234567890
     PERSONAL_NUMBERS,
@@ -21,7 +21,6 @@ const {
 const normalizarNumero = n => (n ?? '').replace(/[\s+\-()]/g, '');
 
 // Parse comma-separated env vars into arrays of normalized numbers
-// Falls back gracefully if someone still uses the old single-number vars
 const PERSONAL_LIST = (PERSONAL_NUMBERS ?? process.env.PERSONAL_PHONE_NUMBER ?? '')
     .split(',').map(n => normalizarNumero(n)).filter(Boolean);
 
@@ -31,13 +30,18 @@ const ADMIN_LIST = (ADMIN_NUMBERS ?? process.env.ADMIN_NUMBER ?? '')
 if (PERSONAL_LIST.length === 0) console.warn('⚠️  PERSONAL_NUMBERS no está configurado en .env');
 if (ADMIN_LIST.length   === 0) console.warn('⚠️  ADMIN_NUMBERS no está configurado en .env');
 
-// Helpers
+// Helpers de permisos
 const esAdmin    = from => ADMIN_LIST.includes(normalizarNumero(from));
 const esPersonal = from => PERSONAL_LIST.includes(normalizarNumero(from));
 
-// Broadcast a todos los números personales (para alertas de leads)
+// Broadcast a todos los números personales (alertas de leads)
 async function enviarATodos(texto) {
     await Promise.all(PERSONAL_LIST.map(num => enviarTexto(num, texto)));
+}
+
+// Broadcast a todos los admins (mensajes reenviados de clientes, notificaciones de CRM)
+async function enviarATodosAdmins(texto) {
+    await Promise.all(ADMIN_LIST.map(num => enviarTexto(num, texto)));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -71,7 +75,6 @@ function obtenerEstado(from) {
     if (!e) return null;
     const ahora = Date.now();
 
-    // lead_hecho tiene su propio timeout de 2 semanas
     if (e.estado === 'lead_hecho') {
         if (ahora - e.leadHechoAt > TIMEOUT_LEAD_HECHO_MS) {
             console.log(`Lead hecho expirado para ${from}. Reseteando.`);
@@ -97,7 +100,6 @@ function setEstado(from, nuevoEstado, extras = {}) {
     guardarEstados(estadoUsuarios);
 }
 function setLeadHecho(from, flujo, datos) {
-    // Estado especial: flujo completado. No vuelve a encuestar por 2 semanas.
     estadoUsuarios[from] = {
         estado: 'lead_hecho',
         flujo,
@@ -122,7 +124,6 @@ function refrescarActividad(from) {
 // FLUJOS PROGRESIVOS — definición de pasos
 // ═══════════════════════════════════════════════════════════════
 
-// ─── CARGADOR NIVEL 2 — 4 pasos ───
 const PREGUNTAS_CARGADOR = [
     {
         estado: 'c1_marca',
@@ -137,7 +138,6 @@ const PREGUNTAS_CARGADOR = [
     {
         estado: 'c2_voltaje',
         campo:  'voltaje',
-        // Texto especial: se envía con botones interactivos, este campo es fallback
         texto:
             "2️⃣ de 4 — *¿Qué tipo de instalación eléctrica tienes disponible?*\n\n" +
             "1️⃣ Tengo 220V (dos fases / línea de 220)\n" +
@@ -161,7 +161,6 @@ const PREGUNTAS_CARGADOR = [
     }
 ];
 
-// ─── PANELES SOLARES — 3 pasos ───
 const PREGUNTAS_PANELES = [
     {
         estado: 'p1_tipo',
@@ -194,7 +193,7 @@ const PREGUNTAS_PANELES = [
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// ALERTAS PROGRESIVAS
+// ALERTAS PROGRESIVAS  (van a TODOS los PERSONAL_NUMBERS)
 // ═══════════════════════════════════════════════════════════════
 
 async function alertarActualizacionCargador(from, datos, paso) {
@@ -214,7 +213,7 @@ async function alertarActualizacionCargador(from, datos, paso) {
         msg += `\n✅ *LEAD COMPLETO* — Entra a Meta Business Suite.\n`;
         msg += `_Al terminar: *#liberar ${from}*_`;
     }
-    await enviarTexto(PERSONAL_PHONE_NUMBER, msg);
+    await enviarATodos(msg);
 }
 
 async function alertarActualizacionPaneles(from, datos, paso) {
@@ -233,23 +232,24 @@ async function alertarActualizacionPaneles(from, datos, paso) {
         msg += `\n✅ *LEAD COMPLETO* — Entra a Meta Business Suite.\n`;
         msg += `_Al terminar: *#liberar ${from}*_`;
     }
-    await enviarTexto(PERSONAL_PHONE_NUMBER, msg);
+    await enviarATodos(msg);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// COMANDOS ADMIN (desde tu número personal)
+// COMANDOS ADMIN (desde CUALQUIER número en ADMIN_NUMBERS)
 // ═══════════════════════════════════════════════════════════════
 const COMANDO_LIBERAR = '#liberar';
 const COMANDO_LISTAR  = '#listar';
 
-async function manejarComandoAdmin(texto, res) {
+// `from` = el admin que mandó el comando; le respondemos a él directamente.
+async function manejarComandoAdmin(texto, from, res) {
     if (texto.startsWith(COMANDO_LIBERAR)) {
         const num = texto.replace(COMANDO_LIBERAR, '').trim().replace('+', '');
         if (num && estadoUsuarios[num]) {
             resetEstado(num);
-            await enviarTexto(PERSONAL_PHONE_NUMBER, `✅ Estado liberado para +${num}. El bot lo atenderá de nuevo.`);
+            await enviarTexto(from, `✅ Estado liberado para +${num}. El bot lo atenderá de nuevo.`);
         } else {
-            await enviarTexto(PERSONAL_PHONE_NUMBER, `⚠️ No encontré al cliente +${num} con estado activo.`);
+            await enviarTexto(from, `⚠️ No encontré al cliente +${num} con estado activo.`);
         }
         return res.sendStatus(200);
     }
@@ -257,7 +257,7 @@ async function manejarComandoAdmin(texto, res) {
         const lista = Object.entries(estadoUsuarios)
             .map(([k, v]) => `+${k} → ${v.estado}${v.flujo ? ` (${v.flujo})` : ''}`)
             .join('\n');
-        await enviarTexto(PERSONAL_PHONE_NUMBER,
+        await enviarTexto(from,
             lista ? `📋 Clientes activos:\n${lista}` : '✅ No hay clientes con estado activo.'
         );
         return res.sendStatus(200);
@@ -274,7 +274,7 @@ const esKeywordMenu = txt => KEYWORDS_MENU.includes(txt.toLowerCase().trim());
 // ═══════════════════════════════════════════════════════════════
 // WEBHOOK GET
 // ═══════════════════════════════════════════════════════════════
-app.get('/', (req, res) => res.send('🔌 Plug n Go Bot v4.0 activo.'));
+app.get('/', (req, res) => res.send('🔌 Plug n Go Bot v4.1 activo (multi-admin).'));
 
 app.get('/webhook', (req, res) => {
     const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
@@ -295,16 +295,14 @@ app.post('/webhook', async (req, res) => {
         const from    = message.from;
 
         // ══════════════════════════════════════════════════════════
-        // MICRO-CRM — solo se ejecuta si el mensaje viene del admin
+        // MICRO-CRM — se ejecuta si el mensaje viene de CUALQUIER admin
         // ══════════════════════════════════════════════════════════
-        if (normalizarNumero(from) === normalizarNumero(ADMIN_NUMBER)) {
+        if (esAdmin(from)) {
 
-            // ── Comandos de gestión (#liberar, #listar) ──
             if (message.type === 'text') {
                 const textoAdmin = message.text.body.trim();
 
-                // Primero verificar si es un comando de gestión
-                const resultadoComando = await manejarComandoAdmin(textoAdmin, res);
+                const resultadoComando = await manejarComandoAdmin(textoAdmin, from, res);
                 if (resultadoComando !== null) return resultadoComando;
 
                 // ── RELAY DE TEXTO: "#52XXXXXXXXXX\nMensaje aquí" ──
@@ -312,8 +310,7 @@ app.post('/webhook', async (req, res) => {
                     const saltoLinea = textoAdmin.indexOf('\n');
 
                     if (saltoLinea === -1) {
-                        // Solo el número, sin mensaje
-                        await enviarTexto(ADMIN_NUMBER,
+                        await enviarTexto(from,
                             "⚠️ Formato incorrecto. Usa:\n\n" +
                             "*#52XXXXXXXXXX*\n" +
                             "Tu mensaje aquí\n\n" +
@@ -326,7 +323,7 @@ app.post('/webhook', async (req, res) => {
                     const mensajeRelay  = textoAdmin.slice(saltoLinea + 1).trim();
 
                     if (!numeroDestino || !mensajeRelay) {
-                        await enviarTexto(ADMIN_NUMBER, "⚠️ No pude leer el número o el mensaje. Verifica el formato.");
+                        await enviarTexto(from, "⚠️ No pude leer el número o el mensaje. Verifica el formato.");
                         return res.sendStatus(200);
                     }
 
@@ -337,10 +334,10 @@ app.post('/webhook', async (req, res) => {
                             type: "text",
                             text: { body: mensajeRelay }
                         });
-                        await enviarTexto(ADMIN_NUMBER, `✅ Mensaje enviado a +${numeroDestino}`);
-                        console.log(`[RELAY TEXTO] Admin → +${numeroDestino}`);
+                        await enviarTexto(from, `✅ Mensaje enviado a +${numeroDestino}`);
+                        console.log(`[RELAY TEXTO] Admin (+${from}) → +${numeroDestino}`);
                     } catch (e) {
-                        await enviarTexto(ADMIN_NUMBER, `❌ Error al enviar a +${numeroDestino}: ${e.message}`);
+                        await enviarTexto(from, `❌ Error al enviar a +${numeroDestino}: ${e.message}`);
                     }
                     return res.sendStatus(200);
                 }
@@ -366,13 +363,13 @@ app.post('/webhook', async (req, res) => {
                                 ...(textoExtra && { caption: textoExtra })
                             }
                         });
-                        await enviarTexto(ADMIN_NUMBER, `✅ Imagen enviada a +${numeroDestino}`);
-                        console.log(`[RELAY IMAGEN] Admin → +${numeroDestino} | media_id: ${mediaId}`);
+                        await enviarTexto(from, `✅ Imagen enviada a +${numeroDestino}`);
+                        console.log(`[RELAY IMAGEN] Admin (+${from}) → +${numeroDestino} | media_id: ${mediaId}`);
                     } catch (e) {
-                        await enviarTexto(ADMIN_NUMBER, `❌ Error enviando imagen a +${numeroDestino}: ${e.message}`);
+                        await enviarTexto(from, `❌ Error enviando imagen a +${numeroDestino}: ${e.message}`);
                     }
                 } else {
-                    await enviarTexto(ADMIN_NUMBER,
+                    await enviarTexto(from,
                         "📸 Para reenviar una imagen a un cliente, pon el número en el *caption* de la foto:\n\n" +
                         "_Ejemplo:_ `#52XXXXXXXXXX Aquí tu cotización`"
                     );
@@ -402,13 +399,13 @@ app.post('/webhook', async (req, res) => {
                                 ...(textoExtra && { caption: textoExtra })
                             }
                         });
-                        await enviarTexto(ADMIN_NUMBER, `✅ Documento "${filename}" enviado a +${numeroDestino}`);
-                        console.log(`[RELAY DOC] Admin → +${numeroDestino} | media_id: ${mediaId}`);
+                        await enviarTexto(from, `✅ Documento "${filename}" enviado a +${numeroDestino}`);
+                        console.log(`[RELAY DOC] Admin (+${from}) → +${numeroDestino} | media_id: ${mediaId}`);
                     } catch (e) {
-                        await enviarTexto(ADMIN_NUMBER, `❌ Error enviando documento a +${numeroDestino}: ${e.message}`);
+                        await enviarTexto(from, `❌ Error enviando documento a +${numeroDestino}: ${e.message}`);
                     }
                 } else {
-                    await enviarTexto(ADMIN_NUMBER,
+                    await enviarTexto(from,
                         "📄 Para reenviar un PDF/documento a un cliente, pon el número en el *caption* del archivo:\n\n" +
                         "_Ejemplo:_ `#52XXXXXXXXXX Cotización adjunta`"
                     );
@@ -423,20 +420,19 @@ app.post('/webhook', async (req, res) => {
         // FIN MICRO-CRM — a partir de aquí solo llegan clientes
         // ══════════════════════════════════════════════════════════
 
-        // ── Estado actual ──
         const entrada      = obtenerEstado(from);
         const estadoActual = entrada?.estado ?? null;
         const datos        = entrada?.datos  ?? {};
 
-        // ── Modo asesor: bot mudo + forward al admin ──
+        // ── Modo asesor: bot mudo + forward a TODOS los admins ──
         if (estadoActual === 'asesor') {
             refrescarActividad(from);
-            console.log(`[ASESOR] Forwardeando mensaje de ${from} al admin`);
+            console.log(`[ASESOR] Forwardeando mensaje de ${from} a admins`);
             await forwardMensajeCliente(from, message, 'asesor');
             return res.sendStatus(200);
         }
 
-        // ── Lead hecho: avisar al cliente (solo 1 vez) + forward al admin ──
+        // ── Lead hecho: avisar al cliente (solo 1 vez) + forward a TODOS los admins ──
         if (estadoActual === 'lead_hecho') {
             refrescarActividad(from);
             const yaAvisado = entrada?.yaAvisadoLeadHecho ?? false;
@@ -459,7 +455,6 @@ app.post('/webhook', async (req, res) => {
         if (message.type === 'interactive') {
             const interactiveData = message.interactive;
 
-            // Botones del menú principal
             if (interactiveData?.button_reply) {
                 const botonID = interactiveData.button_reply.id;
 
@@ -471,7 +466,6 @@ app.post('/webhook', async (req, res) => {
                     setEstado(from, 'c1_marca', { datos: {}, flujo: 'cargador' });
                     await enviarTexto(from, PREGUNTAS_CARGADOR[0].texto);
 
-                // Botones de voltaje (paso c2)
                 } else if (['btn_220v', 'btn_127v', 'btn_nosabe_voltaje'].includes(botonID)) {
                     const voltajeMap = {
                         'btn_220v': '220V (dos fases)',
@@ -479,7 +473,6 @@ app.post('/webhook', async (req, res) => {
                     };
 
                     if (botonID === 'btn_nosabe_voltaje') {
-                        // Sub-paso: pedirle foto del medidor o recibo
                         setEstado(from, 'c2b_foto_voltaje', { datos, flujo: 'cargador' });
                         await enviarTexto(from,
                             "Sin problema, te ayudamos a saberlo 🔍\n\n" +
@@ -505,7 +498,6 @@ app.post('/webhook', async (req, res) => {
         // ════════════════════════════════════════
         } else if (message.type === 'image') {
 
-            // Imagen en paso de voltaje → cliente mandó foto de su medidor
             if (estadoActual === 'c2_voltaje') {
                 const nuevosDatos = { ...datos, voltaje: 'Foto de medidor enviada' };
                 setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
@@ -515,7 +507,6 @@ app.post('/webhook', async (req, res) => {
                     PREGUNTAS_CARGADOR[2].texto
                 );
 
-            // Imagen en sub-paso "no sé mi voltaje" → foto del medidor o recibo
             } else if (estadoActual === 'c2b_foto_voltaje') {
                 const nuevosDatos = { ...datos, voltaje: 'Foto enviada — pendiente revisión' };
                 setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
@@ -525,7 +516,6 @@ app.post('/webhook', async (req, res) => {
                     PREGUNTAS_CARGADOR[2].texto
                 );
 
-            // Último paso paneles: recibo de luz
             } else if (estadoActual === 'p3_recibo') {
                 const datosFinal = { ...datos, recibo: true };
                 setLeadHecho(from, 'paneles', datosFinal);
@@ -556,15 +546,12 @@ app.post('/webhook', async (req, res) => {
         } else if (message.type === 'text') {
             const textoCliente = message.text.body.trim();
 
-            // Escape universal al menú
             if (esKeywordMenu(textoCliente)) {
                 resetEstado(from);
                 await enviarMenuPrincipal(from);
                 return res.sendStatus(200);
             }
 
-            // Validación mínima solo si no hay estado activo
-            // (dentro de un flujo aceptamos cualquier respuesta, incluso "8" o "no")
             if (!estadoActual && textoCliente.length < 2) {
                 await enviarTexto(from,
                     "No entendí ese mensaje 😅\n\n" +
@@ -573,7 +560,6 @@ app.post('/webhook', async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // ─── Si está en c2_voltaje y manda texto en lugar de botón ───
             if (estadoActual === 'c2_voltaje') {
                 const txt = textoCliente.toLowerCase();
                 let voltajeDetectado = textoCliente;
@@ -589,7 +575,6 @@ app.post('/webhook', async (req, res) => {
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
 
-            // ─── Sub-paso: esperando foto del medidor o "omitir" ───
             } else if (estadoActual === 'c2b_foto_voltaje') {
                 const txt = textoCliente.toLowerCase();
                 let voltaje = 'Por evaluar en visita técnica';
@@ -600,7 +585,6 @@ app.post('/webhook', async (req, res) => {
                 } else if (txt.includes('127') || txt.includes('110')) {
                     voltaje = '127V (contactos normales)';
                 } else {
-                    // Cualquier otro texto en este estado → recordar las opciones
                     await enviarTexto(from,
                         "Para continuar puedes:\n\n" +
                         "📸 Mandarnos una *foto de tu medidor* o *recibo de luz*\n" +
@@ -613,7 +597,6 @@ app.post('/webhook', async (req, res) => {
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
 
-            // ─── Flujo CARGADOR ───
             } else if (estadoActual === 'c1_marca') {
                 const nuevosDatos = { ...datos, marca: textoCliente };
                 setEstado(from, 'c2_voltaje', { datos: nuevosDatos, flujo: 'cargador' });
@@ -636,7 +619,6 @@ app.post('/webhook', async (req, res) => {
                 );
                 await alertarActualizacionCargador(from, datosFinal, 4);
 
-            // ─── Flujo PANELES ───
             } else if (estadoActual === 'p1_tipo') {
                 const nuevosDatos = { ...datos, tipo: textoCliente };
                 setEstado(from, 'p2_bimestral', { datos: nuevosDatos, flujo: 'paneles' });
@@ -656,7 +638,6 @@ app.post('/webhook', async (req, res) => {
                     "💡 Escribe *menú* para volver al inicio."
                 );
 
-            // ─── Sin estado → menú ───
             } else {
                 await enviarMenuPrincipal(from);
             }
@@ -681,15 +662,11 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// FORWARD DE MENSAJES DE CLIENTES AL ADMIN
+// FORWARD DE MENSAJES DE CLIENTES A TODOS LOS ADMINS
 // ═══════════════════════════════════════════════════════════════
-// Se ejecuta cuando un cliente escribe estando en estado 'asesor' o 'lead_hecho'.
-// Le manda al admin el mensaje con el formato de respuesta listo para copiar.
-
 async function forwardMensajeCliente(from, message, contexto) {
     const etiqueta = contexto === 'asesor' ? '🔵 *Conversación activa*' : '🟡 *Lead en proceso*';
 
-    // Construir preview del contenido según el tipo de mensaje
     let preview = '';
     let tieneMedia = false;
     let mediaPayload = null;
@@ -736,48 +713,35 @@ async function forwardMensajeCliente(from, message, contexto) {
         preview = `❓ _[Tipo de mensaje: ${message.type}]_`;
     }
 
-    // Armar el texto de notificación
     const notif =
-        `${etiqueta}
-` +
-        `📱 Cliente: +${from}
-
-` +
-        `${preview}
-
-` +
-        `─────────────────
-` +
-        `↩️ *Para responderle con texto:*
-` +
-        `#${from}
-` +
-        `Tu respuesta aquí
-
-` +
-        `↩️ *Para imagen/PDF:* adjunta el archivo y pon en el caption:
-` +
+        `${etiqueta}\n` +
+        `📱 Cliente: +${from}\n\n` +
+        `${preview}\n\n` +
+        `─────────────────\n` +
+        `↩️ *Para responderle con texto:*\n` +
+        `#${from}\n` +
+        `Tu respuesta aquí\n\n` +
+        `↩️ *Para imagen/PDF:* adjunta el archivo y pon en el caption:\n` +
         `\`#${from} texto opcional\``;
 
-    await enviarTexto(ADMIN_NUMBER, notif);
+    // Notifica a TODOS los admins, no solo a uno
+    await enviarATodosAdmins(notif);
 
-    // Si el mensaje tiene media, también se la reenviamos al admin
-    // para que la pueda ver directamente en su WhatsApp
+    // Si el mensaje tiene media, se la reenviamos también a todos los admins
     if (tieneMedia && mediaPayload) {
         try {
-            const mediaData = {
+            await Promise.all(ADMIN_LIST.map(num => hacerPeticionWA({
                 messaging_product: "whatsapp",
-                to:   ADMIN_NUMBER,
+                to:   num,
                 type: mediaPayload.type,
                 [mediaPayload.type]: {
                     id: mediaPayload.id,
                     ...(mediaPayload.caption && { caption: mediaPayload.caption }),
                     ...(mediaPayload.filename && { filename: mediaPayload.filename })
                 }
-            };
-            await hacerPeticionWA(mediaData);
+            })));
         } catch (e) {
-            console.error(`[FORWARD MEDIA] Error reenviando media al admin: ${e.message}`);
+            console.error(`[FORWARD MEDIA] Error reenviando media a admins: ${e.message}`);
         }
     }
 }

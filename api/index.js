@@ -10,12 +10,35 @@ const {
     WHATSAPP_TOKEN,
     VERIFY_TOKEN,
     PHONE_NUMBER_ID,
-    PERSONAL_PHONE_NUMBER,
-    ADMIN_NUMBER           // Tu número admin para el micro-CRM. Puede ser igual a PERSONAL_PHONE_NUMBER.
+    // Comma-separated lists — supports 1 to 3 numbers each:
+    // PERSONAL_NUMBERS=526391237966,521234567890
+    // ADMIN_NUMBERS=526391237966,521234567890
+    PERSONAL_NUMBERS,
+    ADMIN_NUMBERS
 } = process.env;
 
 // Normaliza número: quita +, espacios y guiones para comparar de forma segura
 const normalizarNumero = n => (n ?? '').replace(/[\s+\-()]/g, '');
+
+// Parse comma-separated env vars into arrays of normalized numbers
+// Falls back gracefully if someone still uses the old single-number vars
+const PERSONAL_LIST = (PERSONAL_NUMBERS ?? process.env.PERSONAL_PHONE_NUMBER ?? '')
+    .split(',').map(n => normalizarNumero(n)).filter(Boolean);
+
+const ADMIN_LIST = (ADMIN_NUMBERS ?? process.env.ADMIN_NUMBER ?? '')
+    .split(',').map(n => normalizarNumero(n)).filter(Boolean);
+
+if (PERSONAL_LIST.length === 0) console.warn('⚠️  PERSONAL_NUMBERS no está configurado en .env');
+if (ADMIN_LIST.length   === 0) console.warn('⚠️  ADMIN_NUMBERS no está configurado en .env');
+
+// Helpers
+const esAdmin    = from => ADMIN_LIST.includes(normalizarNumero(from));
+const esPersonal = from => PERSONAL_LIST.includes(normalizarNumero(from));
+
+// Broadcast a todos los números personales (para alertas de leads)
+async function enviarATodos(texto) {
+    await Promise.all(PERSONAL_LIST.map(num => enviarTexto(num, texto)));
+}
 
 // ═══════════════════════════════════════════════════════════════
 // PERSISTENCIA DE ESTADOS  (archivo JSON en disco)

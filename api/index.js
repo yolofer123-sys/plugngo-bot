@@ -1,8 +1,11 @@
 const express = require('express');
 const axios   = require('axios');
-const fs      = require('fs');
-const path    = require('path');
+const { Redis } = require('@upstash/redis');
 const app     = express();
+
+// Cliente de Redis (Upstash) — lee UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN
+// que Vercel inyecta automáticamente al conectar la integración.
+const redis = Redis.fromEnv();
 
 app.use(express.json());
 
@@ -11,7 +14,6 @@ const {
     VERIFY_TOKEN,
     PHONE_NUMBER_ID,
     // Comma-separated lists — soporta de 1 a 3 números cada uno:
-    
     PERSONAL_NUMBERS,
     ADMIN_NUMBERS
 } = process.env;
@@ -44,23 +46,26 @@ async function enviarATodosAdmins(texto) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PERSISTENCIA DE ESTADOS  (archivo JSON en disco)
+// PERSISTENCIA DE ESTADOS  (Redis — necesario porque Vercel es serverless
+// y no tiene disco persistente entre invocaciones/instancias)
 // ═══════════════════════════════════════════════════════════════
-const ESTADOS_FILE = path.join(__dirname, 'estados.json');
+const ESTADOS_KEY = 'plugandgo:estados';
 
-function cargarEstados() {
+async function cargarEstados() {
     try {
-        if (fs.existsSync(ESTADOS_FILE))
-            return JSON.parse(fs.readFileSync(ESTADOS_FILE, 'utf8'));
-    } catch (e) { console.error('Error cargando estados:', e.message); }
-    return {};
+        const data = await redis.get(ESTADOS_KEY);
+        return data || {};
+    } catch (e) { console.error('Error cargando estados:', e.message); return {}; }
 }
-function guardarEstados(estados) {
-    try { fs.writeFileSync(ESTADOS_FILE, JSON.stringify(estados, null, 2)); }
+async function guardarEstados(estados) {
+    try { await redis.set(ESTADOS_KEY, estados); }
     catch (e) { console.error('Error guardando estados:', e.message); }
 }
 
-let estadoUsuarios = cargarEstados();
+// Ya NO se carga una sola vez al arrancar — se recarga en cada request
+// (ver inicio de app.post('/webhook', ...)) porque cada invocación de
+// Vercel puede correr en una instancia distinta.
+let estadoUsuarios = {};
 
 // ═══════════════════════════════════════════════════════════════
 // TIMEOUTS
@@ -69,7 +74,7 @@ const TIMEOUT_FLUJO_MS      = 30 * 60 * 1000;        // 30 min → vuelve al men
 const TIMEOUT_ASESOR_MS     = 24 * 60 * 60 * 1000;   // 24 h   → libera modo asesor
 const TIMEOUT_LEAD_HECHO_MS = 14 * 24 * 60 * 60 * 1000; // 2 semanas → lead_hecho expira
 
-function obtenerEstado(from) {
+async function obtenerEstado(from) {
     const e = estadoUsuarios[from];
     if (!e) return null;
     const ahora = Date.now();
@@ -78,7 +83,7 @@ function obtenerEstado(from) {
         if (ahora - e.leadHechoAt > TIMEOUT_LEAD_HECHO_MS) {
             console.log(`Lead hecho expirado para ${from}. Reseteando.`);
             delete estadoUsuarios[from];
-            guardarEstados(estadoUsuarios);
+            await guardarEstados(estadoUsuarios);
             return null;
         }
         return e;
@@ -88,17 +93,17 @@ function obtenerEstado(from) {
     if (ahora - e.ultimaActividad > timeout) {
         console.log(`Timeout (${e.estado}) para ${from}. Reseteando.`);
         delete estadoUsuarios[from];
-        guardarEstados(estadoUsuarios);
+        await guardarEstados(estadoUsuarios);
         return null;
     }
     return e;
 }
 
-function setEstado(from, nuevoEstado, extras = {}) {
+async function setEstado(from, nuevoEstado, extras = {}) {
     estadoUsuarios[from] = { estado: nuevoEstado, ultimaActividad: Date.now(), ...extras };
-    guardarEstados(estadoUsuarios);
+    await guardarEstados(estadoUsuarios);
 }
-function setLeadHecho(from, flujo, datos) {
+async function setLeadHecho(from, flujo, datos) {
     estadoUsuarios[from] = {
         estado: 'lead_hecho',
         flujo,
@@ -106,16 +111,16 @@ function setLeadHecho(from, flujo, datos) {
         leadHechoAt: Date.now(),
         ultimaActividad: Date.now()
     };
-    guardarEstados(estadoUsuarios);
+    await guardarEstados(estadoUsuarios);
 }
-function resetEstado(from) {
+async function resetEstado(from) {
     delete estadoUsuarios[from];
-    guardarEstados(estadoUsuarios);
+    await guardarEstados(estadoUsuarios);
 }
-function refrescarActividad(from) {
+async function refrescarActividad(from) {
     if (estadoUsuarios[from]) {
         estadoUsuarios[from].ultimaActividad = Date.now();
-        guardarEstados(estadoUsuarios);
+        await guardarEstados(estadoUsuarios);
     }
 }
 
@@ -245,7 +250,7 @@ async function manejarComandoAdmin(texto, from, res) {
     if (texto.startsWith(COMANDO_LIBERAR)) {
         const num = texto.replace(COMANDO_LIBERAR, '').trim().replace('+', '');
         if (num && estadoUsuarios[num]) {
-            resetEstado(num);
+            await resetEstado(num);
             await enviarTexto(from, `✅ Estado liberado para +${num}. El bot lo atenderá de nuevo.`);
         } else {
             await enviarTexto(from, `⚠️ No encontré al cliente +${num} con estado activo.`);
@@ -292,6 +297,11 @@ app.post('/webhook', async (req, res) => {
 
         const message = body.entry[0].changes[0].value.messages[0];
         const from    = message.from;
+
+        // Recargar el estado desde Redis en cada request — en serverless
+        // no podemos confiar en que la memoria del proceso sobreviva
+        // entre invocaciones ni que sea la misma instancia.
+        estadoUsuarios = await cargarEstados();
 
         // ══════════════════════════════════════════════════════════
         // MICRO-CRM — se ejecuta si el mensaje viene de CUALQUIER admin
@@ -419,13 +429,13 @@ app.post('/webhook', async (req, res) => {
         // FIN MICRO-CRM — a partir de aquí solo llegan clientes
         // ══════════════════════════════════════════════════════════
 
-        const entrada      = obtenerEstado(from);
+        const entrada      = await obtenerEstado(from);
         const estadoActual = entrada?.estado ?? null;
         const datos        = entrada?.datos  ?? {};
 
         // ── Modo asesor: bot mudo + forward a TODOS los admins ──
         if (estadoActual === 'asesor') {
-            refrescarActividad(from);
+            await refrescarActividad(from);
             console.log(`[ASESOR] Forwardeando mensaje de ${from} a admins`);
             await forwardMensajeCliente(from, message, 'asesor');
             return res.sendStatus(200);
@@ -433,11 +443,11 @@ app.post('/webhook', async (req, res) => {
 
         // ── Lead hecho: avisar al cliente (solo 1 vez) + forward a TODOS los admins ──
         if (estadoActual === 'lead_hecho') {
-            refrescarActividad(from);
+            await refrescarActividad(from);
             const yaAvisado = entrada?.yaAvisadoLeadHecho ?? false;
             if (!yaAvisado) {
                 estadoUsuarios[from].yaAvisadoLeadHecho = true;
-                guardarEstados(estadoUsuarios);
+                await guardarEstados(estadoUsuarios);
                 await enviarTexto(from,
                     "Tu solicitud ya está en proceso 👍\n\n" +
                     "Un asesor de Plug&Go se pondrá en contacto contigo en breve por este mismo chat.\n\n" +
@@ -458,11 +468,11 @@ app.post('/webhook', async (req, res) => {
                 const botonID = interactiveData.button_reply.id;
 
                 if (botonID === 'btn_paneles') {
-                    setEstado(from, 'p1_tipo', { datos: {}, flujo: 'paneles' });
+                    await setEstado(from, 'p1_tipo', { datos: {}, flujo: 'paneles' });
                     await enviarTexto(from, PREGUNTAS_PANELES[0].texto);
 
                 } else if (botonID === 'btn_cargador') {
-                    setEstado(from, 'c1_marca', { datos: {}, flujo: 'cargador' });
+                    await setEstado(from, 'c1_marca', { datos: {}, flujo: 'cargador' });
                     await enviarTexto(from, PREGUNTAS_CARGADOR[0].texto);
 
                 } else if (['btn_220v', 'btn_127v', 'btn_nosabe_voltaje'].includes(botonID)) {
@@ -472,7 +482,7 @@ app.post('/webhook', async (req, res) => {
                     };
 
                     if (botonID === 'btn_nosabe_voltaje') {
-                        setEstado(from, 'c2b_foto_voltaje', { datos, flujo: 'cargador' });
+                        await setEstado(from, 'c2b_foto_voltaje', { datos, flujo: 'cargador' });
                         await enviarTexto(from,
                             "Sin problema, te ayudamos a saberlo 🔍\n\n" +
                             "Puedes enviarnos cualquiera de estas opciones:\n\n" +
@@ -482,7 +492,7 @@ app.post('/webhook', async (req, res) => {
                         );
                     } else {
                         const nuevosDatos = { ...datos, voltaje: voltajeMap[botonID] };
-                        setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                        await setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                         await alertarActualizacionCargador(from, nuevosDatos, 2);
                         await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
                     }
@@ -499,7 +509,7 @@ app.post('/webhook', async (req, res) => {
 
             if (estadoActual === 'c2_voltaje') {
                 const nuevosDatos = { ...datos, voltaje: 'Foto de medidor enviada' };
-                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from,
                     "📸 ¡Recibida! Nuestro equipo revisará tu instalación con la foto.\n\n" +
@@ -508,7 +518,7 @@ app.post('/webhook', async (req, res) => {
 
             } else if (estadoActual === 'c2b_foto_voltaje') {
                 const nuevosDatos = { ...datos, voltaje: 'Foto enviada — pendiente revisión' };
-                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from,
                     "📸 ¡Listo, imagen recibida! Nuestro equipo la revisará y te dirá qué tipo de instalación tienes.\n\n" +
@@ -517,7 +527,7 @@ app.post('/webhook', async (req, res) => {
 
             } else if (estadoActual === 'p3_recibo') {
                 const datosFinal = { ...datos, recibo: true };
-                setLeadHecho(from, 'paneles', datosFinal);
+                await setLeadHecho(from, 'paneles', datosFinal);
                 await enviarTexto(from,
                     "📄✅ ¡Recibo recibido!\n\n" +
                     "Ya tenemos todo lo que necesitamos. Un asesor revisará tu información y te enviará la cotización *en breve* por este mismo chat.\n\n" +
@@ -546,7 +556,7 @@ app.post('/webhook', async (req, res) => {
             const textoCliente = message.text.body.trim();
 
             if (esKeywordMenu(textoCliente)) {
-                resetEstado(from);
+                await resetEstado(from);
                 await enviarMenuPrincipal(from);
                 return res.sendStatus(200);
             }
@@ -570,7 +580,7 @@ app.post('/webhook', async (req, res) => {
                     voltajeDetectado = 'No sabe / necesita revisión';
                 }
                 const nuevosDatos = { ...datos, voltaje: voltajeDetectado };
-                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
 
@@ -592,25 +602,25 @@ app.post('/webhook', async (req, res) => {
                     return res.sendStatus(200);
                 }
                 const nuevosDatos = { ...datos, voltaje };
-                setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c3_metros', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[2].texto);
 
             } else if (estadoActual === 'c1_marca') {
                 const nuevosDatos = { ...datos, marca: textoCliente };
-                setEstado(from, 'c2_voltaje', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c2_voltaje', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 1);
                 await enviarBotonesVoltaje(from);
 
             } else if (estadoActual === 'c3_metros') {
                 const nuevosDatos = { ...datos, metros: textoCliente };
-                setEstado(from, 'c4_ubicacion', { datos: nuevosDatos, flujo: 'cargador' });
+                await setEstado(from, 'c4_ubicacion', { datos: nuevosDatos, flujo: 'cargador' });
                 await alertarActualizacionCargador(from, nuevosDatos, 3);
                 await enviarTexto(from, PREGUNTAS_CARGADOR[3].texto);
 
             } else if (estadoActual === 'c4_ubicacion') {
                 const datosFinal = { ...datos, ubicacion: textoCliente };
-                setLeadHecho(from, 'cargador', datosFinal);
+                await setLeadHecho(from, 'cargador', datosFinal);
                 await enviarTexto(from,
                     "📍 ¡Listo, ya tengo todo!\n\n" +
                     "Un asesor revisará tu información y te enviará la cotización de tu cargador Nivel 2 *en breve* ⚡\n\n" +
@@ -620,13 +630,13 @@ app.post('/webhook', async (req, res) => {
 
             } else if (estadoActual === 'p1_tipo') {
                 const nuevosDatos = { ...datos, tipo: textoCliente };
-                setEstado(from, 'p2_bimestral', { datos: nuevosDatos, flujo: 'paneles' });
+                await setEstado(from, 'p2_bimestral', { datos: nuevosDatos, flujo: 'paneles' });
                 await alertarActualizacionPaneles(from, nuevosDatos, 1);
                 await enviarTexto(from, PREGUNTAS_PANELES[1].texto);
 
             } else if (estadoActual === 'p2_bimestral') {
                 const nuevosDatos = { ...datos, bimestral: textoCliente };
-                setEstado(from, 'p3_recibo', { datos: nuevosDatos, flujo: 'paneles' });
+                await setEstado(from, 'p3_recibo', { datos: nuevosDatos, flujo: 'paneles' });
                 await alertarActualizacionPaneles(from, nuevosDatos, 2);
                 await enviarTexto(from, PREGUNTAS_PANELES[2].texto);
 

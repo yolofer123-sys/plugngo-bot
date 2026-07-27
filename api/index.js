@@ -11,8 +11,7 @@ const {
     VERIFY_TOKEN,
     PHONE_NUMBER_ID,
     // Comma-separated lists — soporta de 1 a 3 números cada uno:
-    // PERSONAL_NUMBERS=526391237966,521234567890
-    // ADMIN_NUMBERS=526391237966,521234567890
+    
     PERSONAL_NUMBERS,
     ADMIN_NUMBERS
 } = process.env;

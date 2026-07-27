@@ -153,7 +153,7 @@ const PREGUNTAS_CARGADOR = [
         campo:  'metros',
         texto:
             "3️⃣ de 4 — *¿A cuántos metros aproximados está el tablero eléctrico del punto donde quieres instalar el cargador?*\n\n" +
-            "_(Una estimación está bien, ej: \"unos 8 metros\" o \"están en el mismo cuarto\".)_"
+            "_(Una estimación está bien, ej: \"unos 8 metros\" o \"enseguida del tablero electrico\".)_"
     },
     {
         estado: 'c4_ubicacion',
